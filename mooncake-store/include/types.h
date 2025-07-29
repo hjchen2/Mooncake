@@ -7,10 +7,11 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <vector>
 #include <variant>
+#include <vector>
 
 #include "Slab.h"
+#include "allocator.h"
 #include "ylt/struct_json/json_reader.h"
 #include "ylt/struct_json/json_writer.h"
 
@@ -25,7 +26,10 @@ static constexpr uint64_t WRONG_VERSION = 0;
 static constexpr uint64_t DEFAULT_VALUE = UINT64_MAX;
 static constexpr uint64_t ERRNO_BASE = DEFAULT_VALUE - 1000;
 static constexpr uint64_t DEFAULT_DEFAULT_KV_LEASE_TTL =
-    200;  // in milliseconds
+    5000;  // in milliseconds
+static constexpr uint64_t DEFAULT_KV_SOFT_PIN_TTL_MS =
+    30 * 60 * 1000;  // 30 minutes
+static constexpr bool DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS = true;
 static constexpr double DEFAULT_EVICTION_RATIO = 0.1;
 static constexpr double DEFAULT_EVICTION_HIGH_WATERMARK_RATIO = 1.0;
 static constexpr int64_t ETCD_MASTER_VIEW_LEASE_TTL = 5;    // in seconds
@@ -33,7 +37,9 @@ static constexpr int64_t DEFAULT_CLIENT_LIVE_TTL_SEC = 10;  // in seconds
 static const std::string DEFAULT_CLUSTER_ID = "mooncake_cluster";
 
 // Forward declarations
-class BufferAllocator;
+class BufferAllocatorBase;
+class CachelibBufferAllocator;
+class OffsetBufferAllocator;
 class AllocatedBuffer;
 class Replica;
 
@@ -46,7 +52,7 @@ using BufHandleList = std::vector<std::shared_ptr<AllocatedBuffer>>;
 // using ReplicaList = std::vector<ReplicaInfo>;
 using ReplicaList = std::unordered_map<uint32_t, Replica>;
 using BufferResources =
-    std::map<SegmentId, std::vector<std::shared_ptr<BufferAllocator>>>;
+    std::map<SegmentId, std::vector<std::shared_ptr<BufferAllocatorBase>>>;
 // Mapping between c++ and go types
 #ifdef STORE_USE_ETCD
 using EtcdRevisionId = GoInt64;
@@ -83,7 +89,7 @@ enum class ErrorCode : int32_t {
     SEGMENT_ALREADY_EXISTS = -102,    ///< Segment already exists.
 
     // Handle selection errors (Range: -200 to -299)
-    NO_AVAILABLE_HANDLE = -200,  ///< No available handles.
+    NO_AVAILABLE_HANDLE = -200,  ///< Memory allocation failed due to insufficient space.
 
     // Version errors (Range: -300 to -399)
     INVALID_VERSION = -300,  ///< Invalid version.
@@ -123,12 +129,12 @@ enum class ErrorCode : int32_t {
         -1011,  ///< Request cannot be done in current mode.
 
     // FILE errors (Range: -1100 to -1199)
-    FILE_NOT_FOUND = -1100,  ///< File not found.
-    FILE_OPEN_FAIL = -1101,  ///< Error open file or write to a exist file.
-    FILE_READ_FAIL = -1102,  ///< Error reading file.
-    FILE_WRITE_FAIL = -1103,  ///< Error writing file.
+    FILE_NOT_FOUND = -1100,       ///< File not found.
+    FILE_OPEN_FAIL = -1101,       ///< Error open file or write to a exist file.
+    FILE_READ_FAIL = -1102,       ///< Error reading file.
+    FILE_WRITE_FAIL = -1103,      ///< Error writing file.
     FILE_INVALID_BUFFER = -1104,  ///< File buffer is wrong.
-    FILE_LOCK_FAIL = -1105,  ///< File lock operation failed.
+    FILE_LOCK_FAIL = -1105,       ///< File lock operation failed.
     FILE_INVALID_HANDLE = -1106,  ///< Invalid file handle.
 };
 
@@ -205,13 +211,14 @@ inline std::ostream& operator<<(std::ostream& os,
  * @brief Configuration for replica management
  */
 struct ReplicateConfig {
-    size_t replica_num{0};
-    std::string preferred_segment{};  // Preferred segment for allocation,
-                                      // defaults to client's local hostname
+    size_t replica_num{1};
+    bool with_soft_pin{false};
+    std::string preferred_segment{};  // Preferred segment for allocation
 
     friend std::ostream& operator<<(std::ostream& os,
                                     const ReplicateConfig& config) noexcept {
         return os << "ReplicateConfig: { replica_num: " << config.replica_num
+                  << ", with_soft_pin: " << config.with_soft_pin
                   << ", preferred_segment: " << config.preferred_segment
                   << " }";
     }
@@ -219,17 +226,21 @@ struct ReplicateConfig {
 
 class AllocatedBuffer {
    public:
-    friend class BufferAllocator;
+    friend class CachelibBufferAllocator;
+    friend class OffsetBufferAllocator;
     // Forward declaration of the descriptor struct
     struct Descriptor;
 
-    AllocatedBuffer(std::shared_ptr<BufferAllocator> allocator,
+    AllocatedBuffer(std::shared_ptr<BufferAllocatorBase> allocator,
                     std::string segment_name, void* buffer_ptr,
-                    std::size_t size)
+                    std::size_t size,
+                    std::optional<offset_allocator::OffsetAllocationHandle>&&
+                        offset_handle = std::nullopt)
         : allocator_(std::move(allocator)),
           segment_name_(std::move(segment_name)),
           buffer_ptr_(buffer_ptr),
-          size_(size) {}
+          size_(size),
+          offset_handle_(std::move(offset_handle)) {}
 
     ~AllocatedBuffer();
 
@@ -265,11 +276,14 @@ class AllocatedBuffer {
     void mark_complete() { status = BufStatus::COMPLETE; }
 
    private:
-    std::weak_ptr<BufferAllocator> allocator_;
+    std::weak_ptr<BufferAllocatorBase> allocator_;
     std::string segment_name_;
     BufStatus status{BufStatus::INIT};
     void* buffer_ptr_{nullptr};
     std::size_t size_{0};
+    // RAII handle for buffer allocated by offset allocator
+    std::optional<offset_allocator::OffsetAllocationHandle> offset_handle_{
+        std::nullopt};
 };
 
 // Implementation of get_descriptor
@@ -289,7 +303,7 @@ inline std::ostream& operator<<(std::ostream& os,
 }
 
 struct MemoryDescriptor {
-    std::vector<AllocatedBuffer::Descriptor> buffer_descriptors; 
+    std::vector<AllocatedBuffer::Descriptor> buffer_descriptors;
     YLT_REFL(MemoryDescriptor, buffer_descriptors);
 };
 
@@ -325,11 +339,15 @@ class Replica {
     }
 
     void mark_complete() {
-        // prev status should be PROCESSING
-        CHECK_EQ(status_, ReplicaStatus::PROCESSING);
-        status_ = ReplicaStatus::COMPLETE;
-        for (const auto& buf_ptr : buffers_) {
-            buf_ptr->mark_complete();
+        if (status_ == ReplicaStatus::PROCESSING) {
+            status_ = ReplicaStatus::COMPLETE;
+            for (const auto& buf_ptr : buffers_) {
+                buf_ptr->mark_complete();
+            }
+        } else if (status_ == ReplicaStatus::COMPLETE) {
+            LOG(WARNING) << "Replica already marked as complete";
+        } else {
+            LOG(ERROR) << "Invalid replica status: " << status_;
         }
     }
 
@@ -350,7 +368,8 @@ class Replica {
         }
 
         MemoryDescriptor& get_memory_descriptor() {
-            if (auto* desc = std::get_if<MemoryDescriptor>(&descriptor_variant)) {
+            if (auto* desc =
+                    std::get_if<MemoryDescriptor>(&descriptor_variant)) {
                 return *desc;
             }
             throw std::runtime_error("Expected MemoryDescriptor");
@@ -363,14 +382,15 @@ class Replica {
             throw std::runtime_error("Expected DiskDescriptor");
         }
 
-        const MemoryDescriptor& get_memory_descriptor() const{
-            if (auto* desc = std::get_if<MemoryDescriptor>(&descriptor_variant)) {
+        const MemoryDescriptor& get_memory_descriptor() const {
+            if (auto* desc =
+                    std::get_if<MemoryDescriptor>(&descriptor_variant)) {
                 return *desc;
             }
             throw std::runtime_error("Expected MemoryDescriptor");
         }
 
-        const DiskDescriptor& get_disk_descriptor() const{
+        const DiskDescriptor& get_disk_descriptor() const {
             if (auto* desc = std::get_if<DiskDescriptor>(&descriptor_variant)) {
                 return *desc;
             }
@@ -460,6 +480,24 @@ inline std::ostream& operator<<(std::ostream& os,
 
     os << (status_strings.count(status) ? status_strings.at(status)
                                         : "UNKNOWN");
+    return os;
+}
+
+enum class BufferAllocatorType {
+    CACHELIB = 0,  // CachelibBufferAllocator
+    OFFSET = 1,    // OffsetBufferAllocator
+};
+
+/**
+ * @brief Stream operator for BufferAllocatorType
+ */
+inline std::ostream& operator<<(std::ostream& os,
+                                const BufferAllocatorType& type) noexcept {
+    static const std::unordered_map<BufferAllocatorType, std::string_view>
+        type_strings{{BufferAllocatorType::CACHELIB, "CACHELIB"},
+                     {BufferAllocatorType::OFFSET, "OFFSET"}};
+
+    os << (type_strings.count(type) ? type_strings.at(type) : "UNKNOWN");
     return os;
 }
 

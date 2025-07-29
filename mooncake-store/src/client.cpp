@@ -237,6 +237,7 @@ std::optional<std::shared_ptr<Client>> Client::Create(
                      "disabled.";
     } else {
         LOG(INFO) << "Storage root directory is: " << storage_root_dir;
+        LOG(INFO) << "Fs subdir is: " << response.value();
         // Initialize storage backend
         client->PrepareStorageBackend(storage_root_dir, response.value());
     }
@@ -465,15 +466,12 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
                                           const ReplicateConfig& config) {
     // Prepare slice lengths
     std::vector<size_t> slice_lengths;
-    size_t slice_size = 0;
     for (size_t i = 0; i < slices.size(); ++i) {
         slice_lengths.emplace_back(slices[i].size);
-        slice_size += slices[i].size;
     }
 
     // Start put operation
-    auto start_result =
-        master_client_.PutStart(key, slice_lengths, slice_size, config);
+    auto start_result = master_client_.PutStart(key, slice_lengths, config);
     if (!start_result) {
         ErrorCode err = start_result.error();
         if (err == ErrorCode::OBJECT_ALREADY_EXISTS) {
@@ -553,7 +551,8 @@ class PutOperation {
     void SetError(ErrorCode error, const std::string& context = "") {
         result = tl::unexpected(error);
         if (!context.empty()) {
-            failure_context = context;
+            failure_context = toString(error) + ": " + context + "; " +
+                              failure_context.value_or("");
         }
 
         // Update state based on current processing stage
@@ -564,6 +563,8 @@ class PutOperation {
         } else {
             state = PutOperationState::FINALIZE_FAILED;
         }
+        LOG(WARNING) << "Put operation failed for key " << key << ", context: "
+                     << failure_context.value_or("unknown error");
     }
 
     bool IsResolved() const { return state != PutOperationState::PENDING; }
@@ -587,16 +588,13 @@ std::vector<PutOperation> Client::CreatePutOperations(
 void Client::StartBatchPut(std::vector<PutOperation>& ops,
                            const ReplicateConfig& config) {
     std::vector<std::string> keys;
-    std::vector<size_t> value_lengths;
     std::vector<std::vector<uint64_t>> slice_lengths;
 
     keys.reserve(ops.size());
-    value_lengths.reserve(ops.size());
     slice_lengths.reserve(ops.size());
 
     for (const auto& op : ops) {
         keys.emplace_back(op.key);
-        value_lengths.emplace_back(op.value_length);
 
         std::vector<uint64_t> slice_sizes;
         slice_sizes.reserve(op.slices.size());
@@ -606,8 +604,8 @@ void Client::StartBatchPut(std::vector<PutOperation>& ops,
         slice_lengths.emplace_back(std::move(slice_sizes));
     }
 
-    auto start_responses = master_client_.BatchPutStart(keys, value_lengths,
-                                                        slice_lengths, config);
+    auto start_responses =
+        master_client_.BatchPutStart(keys, slice_lengths, config);
 
     // Ensure response size matches request size
     if (start_responses.size() != ops.size()) {
@@ -871,20 +869,39 @@ std::vector<tl::expected<void, ErrorCode>> Client::CollectResults(
     return results;
 }
 
+void Client::BatchPuttoLocalFile(std::vector<PutOperation>& ops) {
+    if (!storage_backend_) {
+        return;  // No storage backend initialized
+    }
+
+    for (const auto& op : ops) {
+        if (op.IsSuccessful()) {
+            // Store to local file if operation was successful
+            PutToLocalFile(op.key, op.slices);
+        } else {
+            LOG(ERROR) << "Skipping local file storage for key " << op.key
+                       << " due to failure: "
+                       << toString(op.result.error());
+        }
+    }
+}
+
 std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
     const std::vector<ObjectKey>& keys,
-    std::vector<std::vector<Slice>>& batched_slices, ReplicateConfig& config) {
+    std::vector<std::vector<Slice>>& batched_slices,
+    const ReplicateConfig& config) {
     std::vector<PutOperation> ops = CreatePutOperations(keys, batched_slices);
     StartBatchPut(ops, config);
     SubmitTransfers(ops);
     WaitForTransfers(ops);
     FinalizeBatchPut(ops);
+    BatchPuttoLocalFile(ops);
     return CollectResults(ops);
 }
 
 tl::expected<void, ErrorCode> Client::Remove(const ObjectKey& key) {
     auto result = master_client_.Remove(key);
-    if(storage_backend_) {
+    if (storage_backend_) {
         storage_backend_->RemoveFile(key);
     }
     if (!result) {
@@ -894,7 +911,7 @@ tl::expected<void, ErrorCode> Client::Remove(const ObjectKey& key) {
 }
 
 tl::expected<long, ErrorCode> Client::RemoveAll() {
-    if(storage_backend_) {
+    if (storage_backend_) {
         storage_backend_->RemoveAll();
     }
     return master_client_.RemoveAll();
@@ -1016,6 +1033,12 @@ tl::expected<void, ErrorCode> Client::unregisterLocalMemory(
 tl::expected<bool, ErrorCode> Client::IsExist(const std::string& key) {
     auto result = master_client_.ExistKey(key);
     if (!result) {
+        if(storage_backend_) {
+            // If master query fails, check storage backend
+            if (storage_backend_->Existkey(key)) {
+                return true;  // Key exists in storage backend
+            }
+        }
         return tl::unexpected(result.error());
     }
     return result.value();
@@ -1052,29 +1075,19 @@ void Client::PrepareStorageBackend(const std::string& storage_root_dir,
     }
 }
 
-ErrorCode Client::GetFromLocalFile(const std::string& object_key,
-                                   std::vector<Slice>& slices,
-                                   std::vector<Replica::Descriptor>& replicas) {
-    if (!storage_backend_) {
-        return ErrorCode::FILE_READ_FAIL;
-    }
-
-    ErrorCode err = storage_backend_->LoadObject(object_key, slices);
-    if (err != ErrorCode::OK) {
-        return err;
-    }
-
-    return ErrorCode::OK;
-}
-
 void Client::PutToLocalFile(const std::string& key,
-                            std::vector<Slice>& slices) {
+                            const std::vector<Slice>& slices) {
     if (!storage_backend_) return;
 
     size_t total_size = 0;
     for (const auto& slice : slices) {
         total_size += slice.size;
     }
+
+    // Currently, persistence is achieved through asynchronous writes, but before asynchronous
+    // writing in 3FS, significant performance degradation may occur due to data copying. 
+    // Profiling reveals that the number of page faults triggered in this scenario is nearly double the normal count. 
+    // Future plans include introducing a reuse buffer list to address this performance degradation issue.
 
     std::string value;
     value.reserve(total_size);
