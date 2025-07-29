@@ -139,17 +139,17 @@ fi
 cd "${REPO_ROOT}/thirdparties"
 check_success "Failed to change to thirdparties directory"
 
-# Check if yalantinglibs is already installed
-if [ -d "yalantinglibs" ]; then
-    echo -e "${YELLOW}yalantinglibs directory already exists. Removing for fresh install...${NC}"
-    rm -rf yalantinglibs
-    check_success "Failed to remove existing yalantinglibs directory"
-fi
+# # Check if yalantinglibs is already installed
+# if [ -d "yalantinglibs" ]; then
+#     echo -e "${YELLOW}yalantinglibs directory already exists. Removing for fresh install...${NC}"
+#     rm -rf yalantinglibs
+#     check_success "Failed to remove existing yalantinglibs directory"
+# fi
 
-# Clone yalantinglibs
-echo "Cloning yalantinglibs from ${GITHUB_PROXY}/alibaba/yalantinglibs.git"
-git clone ${GITHUB_PROXY}/alibaba/yalantinglibs.git
-check_success "Failed to clone yalantinglibs"
+# # Clone yalantinglibs
+# echo "Cloning yalantinglibs from ${GITHUB_PROXY}/alibaba/yalantinglibs.git"
+# git clone ${GITHUB_PROXY}/alibaba/yalantinglibs.git
+# check_success "Failed to clone yalantinglibs"
 
 # Build and install yalantinglibs
 cd yalantinglibs
