@@ -146,11 +146,17 @@ check_success "Failed to change to thirdparties directory"
 #     rm -rf yalantinglibs
 #     check_success "Failed to remove existing yalantinglibs directory"
 # fi
-
+# 
 # # Clone yalantinglibs
 # echo "Cloning yalantinglibs from ${GITHUB_PROXY}/alibaba/yalantinglibs.git"
 # git clone ${GITHUB_PROXY}/alibaba/yalantinglibs.git
 # check_success "Failed to clone yalantinglibs"
+
+if [ ! -d "yalantinglibs" ]; then
+    echo "Cloning yalantinglibs from ${GITHUB_PROXY}/alibaba/yalantinglibs.git"
+    git clone ${GITHUB_PROXY}/alibaba/yalantinglibs.git
+    check_success "Failed to clone yalantinglibs"
+fi
 
 # Build and install yalantinglibs
 cd yalantinglibs
