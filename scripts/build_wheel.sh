@@ -47,6 +47,12 @@ else
     echo "Skipping nvlink_allocator.so (not built - likely ARM64 or non-CUDA build)"
 fi
 
+# # Copy libascend_transport_mem.so to mooncake directory only if it exists
+# if [ -f build/mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/ascend_transport_c/libascend_transport_mem.so ]; then
+#     echo "Copying ASCEND libascend_transport_mem.so..."
+#     cp build/mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/ascend_transport_c/libascend_transport_mem.so mooncake-wheel/mooncake/libascend_transport_mem.so
+# fi
+
 echo "Copying transfer_engine_bench..."
 # Copy transfer_engine_bench
 cp build/mooncake-transfer-engine/example/transfer_engine_bench mooncake-wheel/mooncake/
@@ -61,7 +67,7 @@ rm -rf ${OUTPUT_DIR}/
 mkdir -p ${OUTPUT_DIR}
 
 echo "Installing required build packages"
-pip install --upgrade pip
+# pip install --upgrade pip
 pip install build setuptools wheel auditwheel
 
 # Create directory for repaired wheels

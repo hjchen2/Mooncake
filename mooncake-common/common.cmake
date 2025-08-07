@@ -51,6 +51,7 @@ if(SCCACHE AND ENABLE_SCCACHE)
 endif()
 
 add_compile_definitions(GLOG_USE_GLOG_EXPORT)
+add_compile_options(-fno-tree-slp-vectorize)
 
 option(BUILD_EXAMPLES "Build examples" ON)
 
@@ -106,22 +107,20 @@ if (USE_TCP)
 endif()
 
 if (USE_ASCEND)
-  find_package(MPI REQUIRED)
-  if (NOT MPI_FOUND)
-    message(FATAL "MPI package is not found")
-  endif()
+  # find_package(MPI REQUIRED)
+  # if (NOT MPI_FOUND)
+  #   message(FATAL "MPI package is not found")
+  # endif()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DOPEN_BUILD_PROJECT ")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DOPEN_BUILD_PROJECT ")
 
   file(GLOB ASCEND_TOOLKIT_ROOT "/usr/local/Ascend/ascend-toolkit/latest/*-linux")
   set(ASCEND_LIB_DIR "${ASCEND_TOOLKIT_ROOT}/lib64")
   set(ASCEND_INCLUDE_DIR "${ASCEND_TOOLKIT_ROOT}/include")
-
-  message(STATUS "Found lib64 directories: ${ASCEND_LIB_DIR}")
-  message(STATUS "Found include directories: ${ASCEND_INCLUDE_DIR}")
-
   add_compile_definitions(USE_ASCEND)
-  include_directories(/usr/local/include /usr/include ${ASCEND_INCLUDE_DIR} /usr/include/jsoncpp ${MPI_CXX_INCLUDE_DIRS})
+  # include_directories(/usr/local/include /usr/include ${ASCEND_INCLUDE_DIR} /usr/include/jsoncpp ${MPI_CXX_INCLUDE_DIRS})
+  add_compile_options(-Wno-ignored-qualifiers)
+  include_directories(/usr/local/include /usr/include ${ASCEND_INCLUDE_DIR})
   link_directories(${ASCEND_LIB_DIR})
 endif()
 

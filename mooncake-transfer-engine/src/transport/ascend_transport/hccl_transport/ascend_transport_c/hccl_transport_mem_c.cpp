@@ -95,6 +95,11 @@ uint16_t findAvailableTcpPort(int &sockfd, bool use_ipv6) {
 }
 
 static int initServerNetSocket(RankInfo *local_rank_info) {
+    // aclrtSetDevice(local_rank_info->deviceLogicId);
+    // uint32_t devicePhysicId = 0;
+    // RETRY_CALL(hrtGetDevicePhyIdByIndex(local_rank_info->deviceLogicId, devicePhysicId, true), "hrtGetDevicePhyIdByIndex failed");
+    // std::cout << "deviceLogicId = " << local_rank_info->deviceLogicId << ", devicePhysicId = " << devicePhysicId << ", local_rank_info devicePhyId = " << local_rank_info->devicePhyId << std::endl;
+
     RETRY_CALL(HcclNetInit(NICDeployment::NIC_DEPLOYMENT_DEVICE,
     local_rank_info->devicePhyId, local_rank_info->deviceLogicId, false), "HcclNetInit failed");
 
@@ -218,6 +223,14 @@ static int initControlSocket(RankInfo *local_rank_info) {
 }
 
 int initTransportMem(RankInfo *local_rank_info) {
+    // HcclResult status = HcclNetInit(NICDeployment::NIC_DEPLOYMENT_DEVICE, 0, 0, false);
+    // if (status != HCCL_SUCCESS) {
+    //     LOG(ERROR) << "HcclNetInit failed";
+    //     return -1;
+    // } else {
+    //     LOG(INFO) << "HcclNetInit success";
+    // }
+
     int ret = 0;
     if (local_rank_info == NULL) {
         LOG(ERROR) << "initTransportMem local_rank_info is NULL";
