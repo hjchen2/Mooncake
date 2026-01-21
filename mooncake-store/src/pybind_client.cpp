@@ -285,6 +285,15 @@ tl::expected<void, ErrorCode> PyClient::tearDownAll_internal() {
         // Not initialized or already cleaned; treat as success for idempotence
         return {};
     }
+    if (client_buffer_allocator_ && client_buffer_allocator_->size() > 0) {
+        auto unregister_result = client_->unregisterLocalMemory(
+            client_buffer_allocator_->getBase(), true);
+        if (!unregister_result) {
+            LOG(WARNING)
+                << "Failed to unregister client local buffer on tear down: "
+                << toString(unregister_result.error());
+        }
+    }
     // Reset all resources
     client_.reset();
     client_buffer_allocator_.reset();
