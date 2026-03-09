@@ -44,10 +44,12 @@ AscendDirectTransport::~AscendDirectTransport() {
 
     // Stop worker thread
     running_ = false;
-    queue_cv_.notify_all();
+    for (int i = 0; i < 2; ++i) {
+        queue_cv_[i].notify_all();
 
-    if (worker_thread_.joinable()) {
-        worker_thread_.join();
+        if (worker_thread_[i].joinable()) {
+            worker_thread_[i].join();
+        }
     }
 
     // Disconnect all connections
@@ -122,7 +124,10 @@ int AscendDirectTransport::install(std::string &local_server_name,
     }
     // Start worker thread
     running_ = true;
-    worker_thread_ = std::thread(&AscendDirectTransport::workerThread, this);
+    for (int i = 0; i < 2; ++i) {
+        worker_thread_[i] =
+            std::thread(&AscendDirectTransport::workerThread, this, i);
+    }
     return 0;
 }
 
@@ -232,10 +237,14 @@ Status AscendDirectTransport::submitTransfer(
         slice_list.push_back(slice);
     }
 
-    std::unique_lock<std::mutex> lock(queue_mutex_);
-    slice_queue_.push(slice_list);
+    int slot_index = 0;
+    if (entries.size() > 0 && entries[0].is_store_request) {
+        slot_index = 1;
+    }
+    std::unique_lock<std::mutex> lock(queue_mutex_[slot_index]);
+    slice_queue_[slot_index].push(slice_list);
     lock.unlock();
-    queue_cv_.notify_one();
+    queue_cv_[slot_index].notify_one();
 
     return Status::OK();
 }
@@ -265,10 +274,14 @@ Status AscendDirectTransport::submitTransferTask(
         slice_list.push_back(slice);
     }
 
-    std::unique_lock<std::mutex> lock(queue_mutex_);
-    slice_queue_.push(slice_list);
+    int slot_index = 0;
+    if (task_list.size() > 0 && task_list[0]->request->is_store_request) {
+        slot_index = 1;
+    }
+    std::unique_lock<std::mutex> lock(queue_mutex_[slot_index]);
+    slice_queue_[slot_index].push(slice_list);
     lock.unlock();
-    queue_cv_.notify_one();
+    queue_cv_[slot_index].notify_one();
 
     return Status::OK();
 }
@@ -508,7 +521,7 @@ uint16_t AscendDirectTransport::findAdxlListenPort() const {
     return 0;
 }
 
-void AscendDirectTransport::workerThread() {
+void AscendDirectTransport::workerThread(int slot_index) {
     LOG(INFO) << "AscendDirectTransport worker thread started";
     auto ret = aclrtSetCurrentContext(rt_context_);
     if (ret) {
@@ -518,14 +531,15 @@ void AscendDirectTransport::workerThread() {
     while (running_) {
         std::vector<Slice *> slice_list;
         {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
-            queue_cv_.wait(
-                lock, [this] { return !running_ || !slice_queue_.empty(); });
+            std::unique_lock<std::mutex> lock(queue_mutex_[slot_index]);
+            queue_cv_[slot_index].wait(lock, [this, slot_index] {
+                return !running_ || !slice_queue_[slot_index].empty();
+            });
             if (!running_) {
                 break;
             }
-            slice_list = std::move(slice_queue_.front());
-            slice_queue_.pop();
+            slice_list = std::move(slice_queue_[slot_index].front());
+            slice_queue_[slot_index].pop();
         }
         if (slice_list.empty()) {
             LOG(ERROR) << "AscendDirectTransport: empty transfer request batch";

@@ -521,6 +521,9 @@ std::optional<TransferFuture> TransferSubmitter::submitTransfer(
         LOG(ERROR) << "Failed to allocate batch ID";
         return std::nullopt;
     }
+    for (auto& request : requests) {
+        request.is_store_request = true;
+    }
 
     // Submit transfer
     Status s = engine_.submitTransfer(batch_id, requests);

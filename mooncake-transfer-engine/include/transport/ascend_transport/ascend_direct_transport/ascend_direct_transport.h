@@ -77,7 +77,7 @@ class AscendDirectTransport : public Transport {
    private:
     int allocateLocalSegmentID();
 
-    void workerThread();
+    void workerThread(int slot_index);
 
     void processSliceList(const std::vector<Slice *> &slice_list);
 
@@ -117,10 +117,10 @@ class AscendDirectTransport : public Transport {
     std::mutex connection_mutex_;
 
     // Async processing related members (similar to hccl_transport)
-    std::thread worker_thread_;
-    std::queue<std::vector<Slice *>> slice_queue_;
-    std::mutex queue_mutex_;
-    std::condition_variable queue_cv_;
+    std::thread worker_thread_[2];
+    std::queue<std::vector<Slice *>> slice_queue_[2];
+    std::mutex queue_mutex_[2];
+    std::condition_variable queue_cv_[2];
 
     int32_t device_logic_id_{};
     aclrtContext rt_context_{nullptr};

@@ -60,6 +60,7 @@ class Transport {
         uint64_t target_offset;
         size_t length;
         int advise_retry_cnt = 0;
+        bool is_store_request = 0;
     };
 
     enum TransferStatusEnum {
